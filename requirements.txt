@@ -1,0 +1,29 @@
+# Core LangChain packages
+langchain==0.3.27
+langchain-community==0.3.31
+langchain-huggingface
+langchain-chroma
+langchain-text-splitters
+
+# HuggingFace packages
+huggingface-hub
+transformers
+sentence-transformers
+
+# PDF processing
+pypdf
+
+# Embedding models
+numpy
+
+# Environment management
+python-dotenv
+
+# Vector database
+chromadb
+
+# Additional utilities
+tqdm
+
+# Web UI
+streamlit
