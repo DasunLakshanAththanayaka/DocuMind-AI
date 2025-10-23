@@ -74,8 +74,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 @st.cache_resource
-def initialize_rag_system():
-    """Initialize the RAG system (cached for performance)"""
+def initialize_rag_system(uploaded_file_content=None, uploaded_file_name="uploaded_document.pdf"):
+    """Initialize the RAG system with uploaded PDF (cached for performance)"""
     try:
         # Load environment variables
         load_dotenv()
@@ -101,14 +101,20 @@ def initialize_rag_system():
                 model_name="sentence-transformers/all-mpnet-base-v2"
             )
         
-        # Load PDF
-        pdf_path = "Chapter 01.pdf"
-        if not os.path.exists(pdf_path):
-            return None, f"PDF file '{pdf_path}' not found"
+        # Load PDF from uploaded file only
+        if uploaded_file_content is None:
+            return None, "No PDF file provided. Please upload a PDF file to get started."
         
         with st.spinner("📄 Loading PDF document..."):
-            loader = PyPDFLoader(pdf_path)
+            # Save uploaded file temporarily
+            temp_pdf_path = f"temp_{uploaded_file_name}"
+            with open(temp_pdf_path, "wb") as f:
+                f.write(uploaded_file_content)
+            loader = PyPDFLoader(temp_pdf_path)
             docs = loader.load()
+            # Clean up temporary file
+            os.remove(temp_pdf_path)
+            pdf_source = uploaded_file_name
         
         # Split documents
         with st.spinner("✂️ Processing document..."):
@@ -158,7 +164,7 @@ Answer:
             | output_parser
         )
         
-        return chain, f"✅ System ready! Loaded {len(docs)} pages, {len(splits)} chunks."
+        return chain, f"✅ System ready! Loaded '{pdf_source}': {len(docs)} pages, {len(splits)} chunks."
         
     except Exception as e:
         return None, f"❌ Error: {str(e)}"
@@ -174,12 +180,63 @@ def main():
     with st.sidebar:
         st.header("📋 System Info")
         
-        # Initialize RAG system
-        if 'rag_chain' not in st.session_state:
-            st.info("🔄 Initializing RAG system...")
-            chain, status = initialize_rag_system()
-            st.session_state.rag_chain = chain
-            st.session_state.init_status = status
+        # File Upload Section
+        st.subheader("📁 Upload Your PDF (Required)")
+        uploaded_file = st.file_uploader(
+            "Choose a PDF file", 
+            type="pdf",
+            help="Upload any PDF document you want to ask questions about"
+        )
+        
+        # Display upload status
+        if uploaded_file is not None:
+            st.success(f"✅ File uploaded: {uploaded_file.name}")
+            st.info(f"📊 File size: {uploaded_file.size:,} bytes")
+        else:
+            st.warning("⚠️ Please upload a PDF file to get started")
+            st.info("📤 No file uploaded yet")
+        
+        st.markdown("---")
+        
+        # Initialize or reinitialize RAG system based on uploaded file
+        if 'rag_chain' not in st.session_state or 'current_file' not in st.session_state:
+            st.session_state.current_file = None
+            st.session_state.rag_chain = None
+            st.session_state.init_status = "Not initialized"
+        
+        # Check if we need to reinitialize due to new file upload
+        file_changed = False
+        if uploaded_file is not None:
+            current_file_name = uploaded_file.name
+            if st.session_state.current_file != current_file_name:
+                file_changed = True
+                st.session_state.current_file = current_file_name
+        else:
+            if st.session_state.current_file is not None:
+                file_changed = True
+                st.session_state.current_file = None
+        
+        # Initialize or reinitialize RAG system
+        if st.session_state.rag_chain is None or file_changed:
+            if uploaded_file is not None:
+                if file_changed:
+                    st.info("🔄 New file detected, reinitializing system...")
+                    # Clear cache for reinitialization
+                    initialize_rag_system.clear()
+                else:
+                    st.info("🔄 Initializing RAG system...")
+                
+                # Use uploaded file
+                chain, status = initialize_rag_system(
+                    uploaded_file_content=uploaded_file.read(),
+                    uploaded_file_name=uploaded_file.name
+                )
+                st.session_state.rag_chain = chain
+                st.session_state.init_status = status
+            else:
+                # No file uploaded - system cannot initialize
+                st.session_state.rag_chain = None
+                st.session_state.init_status = "⚠️ Please upload a PDF file to start using the system."
         
         # Display initialization status
         if st.session_state.rag_chain is not None:
@@ -195,23 +252,38 @@ def main():
         st.subheader("🔧 Configuration")
         st.write("**Model:** Mistral-7B-Instruct-v0.3")
         st.write("**Embeddings:** all-mpnet-base-v2")
-        st.write("**Document:** Chapter 01.pdf")
-        st.write("**Chunk Size:** 1000 tokens (improved)")
-        st.write("**Retrieval:** 6 chunks (comprehensive)")
+        
+        # Show current document
+        if st.session_state.current_file:
+            st.write(f"**Document:** {st.session_state.current_file}")
+        else:
+            st.write("**Document:** None (upload required)")
+            
+        st.write("**Chunk Size:** 1000 tokens")
+        st.write("**Retrieval:** 6 chunks")
         
         st.markdown("---")
         
         # Instructions
         st.subheader("💡 How to Use")
-        st.write("1. Type your question in the chat box")
-        st.write("2. Press Enter or click Send")
-        st.write("3. Wait for the AI response")
-        st.write("4. Ask follow-up questions!")
+        st.write("1. 📁 Upload your PDF file above (required)")
+        st.write("2. ✅ Wait for system initialization")
+        st.write("3. 💬 Type your question in the chat box")
+        st.write("4. 📤 Press Enter or click Send")
+        st.write("5. ⏳ Wait for the AI response")
+        st.write("6. 🔄 Ask follow-up questions!")
         
-        # Clear chat button
-        if st.button("🗑️ Clear Chat History"):
-            st.session_state.messages = []
-            st.rerun()
+        # Action buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ Clear Chat"):
+                st.session_state.messages = []
+                st.rerun()
+        with col2:
+            if st.button("🔄 Reload System"):
+                initialize_rag_system.clear()
+                st.session_state.rag_chain = None
+                st.rerun()
     
     # Main chat interface
     if st.session_state.rag_chain is not None:
@@ -219,9 +291,14 @@ def main():
         if "messages" not in st.session_state:
             st.session_state.messages = []
             # Add welcome message
+            welcome_msg = "👋 Hello! I'm your RAG assistant. I can answer questions about your PDF document. "
+            if st.session_state.current_file:
+                welcome_msg += f"I'm currently analyzing '{st.session_state.current_file}'. "
+            welcome_msg += "What would you like to know?"
+            
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": "👋 Hello! I'm your RAG assistant. I can answer questions about your PDF document. What would you like to know?"
+                "content": welcome_msg
             })
         
         # Display chat messages
@@ -255,7 +332,7 @@ def main():
             """, unsafe_allow_html=True)
             
             # Get AI response
-            with st.spinner("🤖 AI is thinking..."):
+            with st.spinner("🤖Thinking..."):
                 try:
                     response = st.session_state.rag_chain.invoke(prompt)
                     
@@ -278,41 +355,24 @@ def main():
     
     else:
         # Show setup instructions if RAG system failed to initialize
-        st.error("🚫 RAG system is not ready. Please check the sidebar for details.")
-        
-        st.subheader("🔧 Setup Instructions:")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
+        if uploaded_file is None:
+            st.info("📁 Please upload a PDF file in the sidebar to start chatting with your documents!")
             st.markdown("""
-            **1. Create .env file:**
-            ```
-            HUGGINGFACE_API_TOKEN=your_token_here
-            ```
-            """)
+            ### � Getting Started
             
-            st.markdown("""
-            **2. Get HuggingFace Token:**
-            - Go to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-            - Create a new token
-            - Copy and paste in .env file
-            """)
-        
-        with col2:
-            st.markdown("""
-            **3. Add PDF file:**
-            - Place 'Chapter 01.pdf' in the same folder
-            - Or update the code with your PDF filename
-            """)
+            1. **Upload your PDF** using the file uploader in the sidebar
+            2. **Wait for processing** - the system will analyze your document
+            3. **Start chatting** - ask questions about your PDF content
             
-            st.markdown("""
-            **4. Install packages:**
-            ```bash
-            pip install -r requirements.txt
-            ```
+            ### 📋 Supported Files
+            - Any PDF document
+            - Academic papers, books, manuals, reports
+            - Text-based PDFs work best
             """)
-
+        else:
+            st.error("🚫 RAG system failed to initialize. Please check the sidebar for details.")
+        
+        
 # Footer
 st.markdown("---")
 st.markdown("""
