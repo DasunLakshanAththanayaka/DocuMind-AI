@@ -1,52 +1,51 @@
 """
-Simple RAG Streamlit App
-========================
-
-A beginner-friendly web interface for the RAG system using Streamlit.
-
-How to run:
-1. Install requirements: pip install streamlit
-2. Run the app: streamlit run rag_streamlit_app.py
-
-Author: Your Name
-Date: October 2025
+🧠 RAG Chat System with Memory
+A beginner-friendly RAG system that remembers your conversation for follow-up questions.
 """
 
 import streamlit as st
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 
-# Import RAG components
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
-from langchain_community.embeddings import HuggingFaceBgeEmbeddings
+# LangChain imports
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import HuggingFaceBgeEmbeddings
+from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema.output_parser import StrOutputParser
+from langchain.schema.runnable import RunnablePassthrough
 
-# Set page config
+# Configure page
 st.set_page_config(
-    page_title="Simple RAG Chat",
-    page_icon="📚",
+    page_title=" RAG Chat with Memory",
+    page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Custom CSS for better UI
 st.markdown("""
 <style>
     .main-header {
-        font-size: 2.5rem;
-        color: #1f77b4;
         text-align: center;
+        color: #2E86AB;
+        font-size: 2.5rem;
         margin-bottom: 2rem;
+        text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
     }
     .chat-message {
         padding: 1rem;
-        border-radius: 0.5rem;
-        margin: 1rem 0;
+        margin: 0.5rem 0;
+        border-radius: 10px;
+        border-left: 5px solid;
+        animation: fadeIn 0.5s;
+    }
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
     }
     .user-message {
         background-color: #e3f2fd;
@@ -55,6 +54,12 @@ st.markdown("""
     .assistant-message {
         background-color: #f3e5f5;
         border-left: 4px solid #9c27b0;
+    }
+    .memory-message {
+        background-color: #fff3e0;
+        border-left: 4px solid #ff9800;
+        font-size: 0.9rem;
+        opacity: 0.8;
     }
     .success-box {
         padding: 1rem;
@@ -70,12 +75,54 @@ st.markdown("""
         border-radius: 0.25rem;
         color: #721c24;
     }
+    .memory-stats {
+        background-color: #e8f5e8;
+        padding: 0.5rem;
+        border-radius: 5px;
+        margin: 0.5rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+def get_chat_history():
+    """Get formatted conversation history for the AI"""
+    if 'conversation_memory' not in st.session_state or not st.session_state.conversation_memory:
+        return "This is the start of our conversation."
+    
+    # Get last 5 exchanges to keep context manageable
+    recent_memory = st.session_state.conversation_memory[-5:]
+    
+    history = "Previous conversation:\n"
+    for i, exchange in enumerate(recent_memory, 1):
+        history += f"Q{i}: {exchange['question']}\n"
+        history += f"A{i}: {exchange['answer'][:200]}...\n\n"  # Truncate long answers
+    
+    return history
+
+def save_to_memory(question, answer):
+    """Save Q&A exchange to conversation memory"""
+    if 'conversation_memory' not in st.session_state:
+        st.session_state.conversation_memory = []
+    
+    # Add new exchange
+    st.session_state.conversation_memory.append({
+        'question': question,
+        'answer': answer,
+        'timestamp': datetime.now().strftime("%H:%M:%S")
+    })
+    
+    # Keep only last 10 exchanges to prevent memory overflow
+    if len(st.session_state.conversation_memory) > 10:
+        st.session_state.conversation_memory = st.session_state.conversation_memory[-10:]
+
+def clear_memory():
+    """Clear conversation memory"""
+    st.session_state.conversation_memory = []
+    st.session_state.messages = []
+
 @st.cache_resource
-def initialize_rag_system(uploaded_file_content=None, uploaded_file_name="uploaded_document.pdf"):
-    """Initialize the RAG system with uploaded PDF (cached for performance)"""
+def initialize_rag_system_with_memory(uploaded_file_content=None, uploaded_file_name="uploaded_document.pdf"):
+    """Initialize the RAG system with memory capabilities"""
     try:
         # Load environment variables
         load_dotenv()
@@ -119,8 +166,8 @@ def initialize_rag_system(uploaded_file_content=None, uploaded_file_name="upload
         # Split documents
         with st.spinner("✂️ Processing document..."):
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,  # Increased for more complete information
-                chunk_overlap=100  # Increased overlap to avoid missing connections
+                chunk_size=1000,  # Good chunk size for context
+                chunk_overlap=100  # Overlap to maintain connections
             )
             splits = text_splitter.split_documents(docs)
         
@@ -131,49 +178,102 @@ def initialize_rag_system(uploaded_file_content=None, uploaded_file_name="upload
                 embedding=embedding_model
             )
             retriever = vectorstore.as_retriever(
-                search_kwargs={"k": 6}  # Retrieve more chunks for comprehensive answers
+                search_kwargs={"k": 6}  # Retrieve multiple chunks
             )
         
-        # Create prompt template
+        # Create enhanced prompt template with memory
         template = """
-You are a helpful assistant that answers questions based on the provided context. 
+You are a helpful assistant that answers questions based on the provided context and conversation history.
 
-IMPORTANT: Use ALL the relevant information from the context to provide a comprehensive answer. If the question asks about multiple items or functionalities, make sure to include ALL of them in your response, not just the first few.
+Conversation History:
+{chat_history}
 
-Question: {question}
+Current Question: {question}
 
-Context:
+Document Context:
 {context}
 
 Instructions:
-- Provide a complete and comprehensive answer using ALL relevant information from the context
-- If the context mentions multiple items (like a list of functionalities), include ALL of them
-- Structure your answer clearly with bullet points or numbers when appropriate
-- If some information is not in the context, say so, but still provide what IS available
+- Use the conversation history to understand what the current question is referring to
+- If the question uses pronouns like "it", "that", "them", "this", determine what they refer to from the conversation history
+- Answer the question directly and naturally without mentioning that you're using conversation history
+- Provide a comprehensive answer using the document context
+- Do NOT say phrases like "as discussed in the conversation history" or "referring to the previous topic"
+- Simply answer the question as if the context is naturally understood
+- Keep your answer focused, direct, and natural
 
 Answer:
 """
         prompt = ChatPromptTemplate.from_template(template)
         output_parser = StrOutputParser()
         
-        # Create RAG chain
+        # Create RAG chain with memory
+        def format_docs(docs):
+            return "\n\n".join(doc.page_content for doc in docs)
+        
         chain = (
-            {"context": retriever, "question": RunnablePassthrough()}
+            {
+                "context": retriever | format_docs,
+                "question": RunnablePassthrough(),
+                "chat_history": lambda x: get_chat_history()
+            }
             | prompt
             | llm
             | output_parser
         )
         
-        return chain, f"✅ System ready! Loaded '{pdf_source}': {len(docs)} pages, {len(splits)} chunks."
+        return chain, f"✅ System with Memory ready! Loaded '{pdf_source}': {len(docs)} pages, {len(splits)} chunks."
         
     except Exception as e:
         return None, f"❌ Error: {str(e)}"
 
+def display_memory_sidebar():
+    """Display conversation memory in sidebar"""
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🧠 Conversation Memory")
+    
+    if 'conversation_memory' not in st.session_state:
+        st.session_state.conversation_memory = []
+    
+    memory_count = len(st.session_state.conversation_memory)
+    if memory_count > 0:
+        st.sidebar.markdown(f'<div class="memory-stats">💭 Remembered: {memory_count} exchanges</div>', 
+                           unsafe_allow_html=True)
+        
+        # Show recent memory
+        st.sidebar.write("**Recent topics:**")
+        for i, exchange in enumerate(st.session_state.conversation_memory[-3:], 1):
+            st.sidebar.write(f"{i}. {exchange['question'][:50]}...")
+        
+        # Memory controls
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            if st.button("🧹 Clear Memory"):
+                clear_memory()
+                st.rerun()
+        with col2:
+            if st.button("📜 Show All"):
+                st.session_state.show_memory_details = not st.session_state.get('show_memory_details', False)
+        
+        # Show detailed memory if requested
+        if st.session_state.get('show_memory_details', False):
+            st.sidebar.markdown("**Memory Details:**")
+            for i, exchange in enumerate(st.session_state.conversation_memory, 1):
+                with st.sidebar.expander(f"Exchange {i} ({exchange['timestamp']})"):
+                    st.write(f"**Q:** {exchange['question']}")
+                    st.write(f"**A:** {exchange['answer'][:100]}...")
+    # else:
+    #     st.sidebar.info("💭 No conversation history yet. Start asking questions!")
+
 def main():
-    """Main Streamlit app"""
+    """Main Streamlit app with memory"""
+    
+    # Initialize conversation memory
+    if 'conversation_memory' not in st.session_state:
+        st.session_state.conversation_memory = []
     
     # Header
-    st.markdown('<h1 class="main-header">📚 Simple RAG Chat System</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🧠 DocuMind AI</h1>', unsafe_allow_html=True)
     st.markdown("---")
     
     # Sidebar
@@ -191,7 +291,7 @@ def main():
         # Display upload status
         if uploaded_file is not None:
             st.success(f"✅ File uploaded: {uploaded_file.name}")
-            st.info(f"📊 File size: {uploaded_file.size:,} bytes")
+            # st.info(f"📊 File size: {uploaded_file.size:,} bytes")
         else:
             st.warning("⚠️ Please upload a PDF file to get started")
             st.info("📤 No file uploaded yet")
@@ -211,6 +311,8 @@ def main():
             if st.session_state.current_file != current_file_name:
                 file_changed = True
                 st.session_state.current_file = current_file_name
+                # Clear memory when switching documents
+                clear_memory()
         else:
             if st.session_state.current_file is not None:
                 file_changed = True
@@ -222,12 +324,12 @@ def main():
                 if file_changed:
                     st.info("🔄 New file detected, reinitializing system...")
                     # Clear cache for reinitialization
-                    initialize_rag_system.clear()
+                    initialize_rag_system_with_memory.clear()
                 else:
-                    st.info("🔄 Initializing RAG system...")
+                    st.info("🔄 Initializing RAG system with memory...")
                 
                 # Use uploaded file
-                chain, status = initialize_rag_system(
+                chain, status = initialize_rag_system_with_memory(
                     uploaded_file_content=uploaded_file.read(),
                     uploaded_file_name=uploaded_file.name
                 )
@@ -248,10 +350,11 @@ def main():
         
         st.markdown("---")
         
-        # System information
-        st.subheader("🔧 Configuration")
-        st.write("**Model:** Mistral-7B-Instruct-v0.3")
-        st.write("**Embeddings:** all-mpnet-base-v2")
+        # # System information
+        # st.subheader("🔧 Configuration")
+        # st.write("**Model:** Mistral-7B-Instruct-v0.3")
+        # st.write("**Embeddings:** all-mpnet-base-v2")
+        # st.write("**Memory:** ✅ Enabled (10 exchanges)")
         
         # Show current document
         if st.session_state.current_file:
@@ -259,19 +362,24 @@ def main():
         else:
             st.write("**Document:** None (upload required)")
             
-        st.write("**Chunk Size:** 1000 tokens")
-        st.write("**Retrieval:** 6 chunks")
+        # st.write("**Chunk Size:** 1000 tokens")
+        # st.write("**Retrieval:** 6 chunks")
+        
+        # Display memory information
+        display_memory_sidebar()
         
         st.markdown("---")
         
         # Instructions
-        st.subheader("💡 How to Use")
-        st.write("1. 📁 Upload your PDF file above (required)")
+        st.subheader("💡 How to Use with Memory")
+        st.write("1. 📁 Upload your PDF file above")
         st.write("2. ✅ Wait for system initialization")
-        st.write("3. 💬 Type your question in the chat box")
-        st.write("4. 📤 Press Enter or click Send")
-        st.write("5. ⏳ Wait for the AI response")
-        st.write("6. 🔄 Ask follow-up questions!")
+        st.write("3. 💬 Ask your questions")
+        # st.write("4. 🧠 Ask follow-up questions using 'it', 'that', etc.")
+        # st.write("5. 📜 Check memory sidebar for conversation history")
+        # st.write("6. 🧹 Clear memory to start fresh")
+        
+        
         
         # Action buttons
         col1, col2 = st.columns(2)
@@ -281,7 +389,7 @@ def main():
                 st.rerun()
         with col2:
             if st.button("🔄 Reload System"):
-                initialize_rag_system.clear()
+                initialize_rag_system_with_memory.clear()
                 st.session_state.rag_chain = None
                 st.rerun()
     
@@ -291,7 +399,11 @@ def main():
         if "messages" not in st.session_state:
             st.session_state.messages = []
             # Add welcome message
-            welcome_msg = "👋 Hello! I'm your RAG assistant. I can answer questions about your PDF document. "
+            welcome_msg = "👋 Hello! I'm your RAG assistant with memory! 🧠\n\n"
+            welcome_msg += "I can remember our conversation, so you can ask follow-up questions like:\n"
+            welcome_msg += "- 'What are its main features?' (after asking about something)\n"
+            welcome_msg += "- 'Can you explain that further?'\n"
+            welcome_msg += "- 'How does it work?'\n\n"
             if st.session_state.current_file:
                 welcome_msg += f"I'm currently analyzing '{st.session_state.current_file}'. "
             welcome_msg += "What would you like to know?"
@@ -319,7 +431,7 @@ def main():
                 """, unsafe_allow_html=True)
         
         # Chat input
-        if prompt := st.chat_input("Ask me anything about your document..."):
+        if prompt := st.chat_input("Ask me anything about your document...."):
             # Add user message to chat history
             st.session_state.messages.append({"role": "user", "content": prompt})
             
@@ -331,8 +443,17 @@ def main():
             </div>
             """, unsafe_allow_html=True)
             
+            # Show memory usage if available
+            if st.session_state.conversation_memory:
+                memory_count = len(st.session_state.conversation_memory)
+                # st.markdown(f"""
+                # <div class="chat-message memory-message">
+                #     <strong>🧠 Using Memory:</strong> I remember {memory_count} previous exchanges to understand your question better.
+                # </div>
+                # """, unsafe_allow_html=True)
+            
             # Get AI response
-            with st.spinner("🤖Thinking..."):
+            with st.spinner("🤖 Thinking..."):
                 try:
                     response = st.session_state.rag_chain.invoke(prompt)
                     
@@ -341,6 +462,9 @@ def main():
                         answer = response.content
                     else:
                         answer = str(response)
+                    
+                    # Save to memory
+                    save_to_memory(prompt, answer)
                     
                     # Add assistant response to chat history
                     st.session_state.messages.append({"role": "assistant", "content": answer})
@@ -358,11 +482,19 @@ def main():
         if uploaded_file is None:
             st.info("📁 Please upload a PDF file in the sidebar to start chatting with your documents!")
             st.markdown("""
-            ### � Getting Started
+            ### 🚀 Getting Started with Memory
             
             1. **Upload your PDF** using the file uploader in the sidebar
             2. **Wait for processing** - the system will analyze your document
-            3. **Start chatting** - ask questions about your PDF content
+            3. **Start chatting** - ask your first question
+            4. **Ask follow-ups** - use phrases like "What about that?", "How does it work?", etc.
+            5. **Check memory** - see conversation history in the sidebar
+            
+            ### 🧠 Memory Features
+            - Remembers up to 10 conversation exchanges
+            - Understands follow-up questions with pronouns (it, that, they)
+            - Maintains context across multiple questions
+            - Clear memory button to start fresh
             
             ### 📋 Supported Files
             - Any PDF document
@@ -377,7 +509,7 @@ def main():
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #666;">
-    📚 Simple RAG Chat System | Built with Streamlit & LangChain
+    🧠 RAG Chat System with Memory | Built with Streamlit & LangChain | Follow-up Questions Enabled
 </div>
 """, unsafe_allow_html=True)
 
